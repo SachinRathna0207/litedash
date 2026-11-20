@@ -1,0 +1,50 @@
+name: Build test APK (OBD widgets)
+
+# Applies obd-widgets.patch (the OBD telemetry widgets) on top of this fork and builds a debug APK,
+# published as a prerelease so it can be downloaded straight to a phone.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the OBD widgets patch
+        run: git apply --whitespace=nowarn obd-widgets.patch
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK and run unit tests
+        run: ./gradlew assemblePlayDebug testPlayDebugUnitTest --console=plain
+
+      - name: Keep the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: litedash-obd-widgets-apk
+          path: app/build/outputs/apk/play/debug/*.apk
+
+      - name: Publish the APK as a prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: obd-widgets-${{ github.run_number }}
+          name: OBD widgets test build ${{ github.run_number }}
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          body: Debug build of the OBD telemetry widgets for testing. Not an official LiteDash release.
+          files: app/build/outputs/apk/play/debug/*.apk
