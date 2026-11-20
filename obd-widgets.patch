@@ -1,0 +1,572 @@
+diff --git a/app/src/main/java/com/irvingguerra/litedash/Home.kt b/app/src/main/java/com/irvingguerra/litedash/Home.kt
+index 814efb0..286cb88 100644
+--- a/app/src/main/java/com/irvingguerra/litedash/Home.kt
++++ b/app/src/main/java/com/irvingguerra/litedash/Home.kt
+@@ -342,6 +342,7 @@ fun TileContent(d: Dependencies, p: Tile, apps: List<App>, car: CarPackage?, rev
+         TileTypes.WORKSHOP -> HealthTile(d, showCar = p.flag(WidgetFlags.CAR)) { actions.onPanel(Panel.Workshop) }
+         TileTypes.PROJECTION -> ProjectionTile(d, apps, appKeyOf(p.data)) { actions.onPanel(Panel.Drawer) }
+         TileTypes.TIRES -> TiresTile(d, showCar = p.flag(WidgetFlags.CAR), onOpen = actions.onTires, onSettings = { actions.onPanel(Panel.TiresSettings) })
++        in OBD_WIDGETS -> ObdWidget(d, p.type) { actions.onPanel(Panel.Workshop) }
+         TileTypes.MAP -> Box(Modifier.expandable(p, actions)) {
+             // Con «Usar app de mapas externa», el toque y Casa/Trabajo abren esa app; apagado, todo es el mapa de LiteDash.
+             val app = externalMapApp(d, apps)
+@@ -386,7 +387,7 @@ private fun Modifier.expandable(p: Tile, actions: TileActions) =
+  * apagado, las plantillas la traen y desde ella se prende.
+  */
+ fun moduleOff(d: Dependencies, type: String): Int? = when (type) {
+-    TileTypes.WORKSHOP, TileTypes.GAUGE -> R.string.module_obd.takeIf { !d.obdModule }
++    TileTypes.WORKSHOP, TileTypes.GAUGE, in OBD_WIDGETS -> R.string.module_obd.takeIf { !d.obdModule }
+     TileTypes.TIRES -> R.string.module_tpms.takeIf { !d.hasTpmsSource }
+     else -> null
+ }
+@@ -799,7 +800,8 @@ fun Home(d: Dependencies, revision: Int, homePressed: Int) {
+                                             }
+                                         },
+                                         // Todos tienen opciones; el auto 3D, solo con Llantas prendido (las de las llantas).
+-                                        hasSettings = { it.type != TileTypes.CAR || d.hasTpmsSource },
++                                        // Los widgets OBD en vivo no tienen (solo la tarjeta, que se quita con su botón).
++                                        hasSettings = { (it.type != TileTypes.CAR || d.hasTpmsSource) && it.type !in OBD_WIDGETS },
+                                         onTapEmpty = { if (!barShown) barPeek++ },
+                                     ) { p -> TileContent(d, p, apps, car, revision, actions) }
+                                 }
+diff --git a/app/src/main/java/com/irvingguerra/litedash/ObdWidgets.kt b/app/src/main/java/com/irvingguerra/litedash/ObdWidgets.kt
+new file mode 100644
+index 0000000..cbad0df
+--- /dev/null
++++ b/app/src/main/java/com/irvingguerra/litedash/ObdWidgets.kt
+@@ -0,0 +1,387 @@
++package com.irvingguerra.litedash
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.drawBehind
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.StrokeCap
++import androidx.compose.ui.graphics.drawscope.Stroke
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.irvingguerra.litedash.core.ui.Card
++import com.irvingguerra.litedash.core.ui.Label
++import com.irvingguerra.litedash.core.ui.LocalColors
++import com.irvingguerra.litedash.core.ui.Radius
++import com.irvingguerra.litedash.core.ui.TilePadding
++import com.irvingguerra.litedash.core.ui.Typography
++import com.irvingguerra.litedash.core.ui.fitFont
++import com.irvingguerra.litedash.core.vehicle.Signal
++import com.irvingguerra.litedash.core.vehicle.watch
++import com.irvingguerra.litedash.feature.dashboard.TileTypes
++import com.irvingguerra.litedash.feature.obd.ObdRepository
++import com.irvingguerra.litedash.feature.obd.ObdState
++import java.util.Locale
++import kotlin.math.abs
++
++// Widgets del OBD en vivo (como la página "Telemetría"): cada uno es una pieza del inicio que se mueve, cambia de
++// tamaño y va con o sin tarjeta como las demás. Solo leen del bus lo que muestran, y solo con el OBD conectado.
++
++/** Los widgets de esta familia: dependen del módulo OBD y no tienen panel de opciones. */
++val OBD_WIDGETS = setOf(TileTypes.OBD_STACK, TileTypes.OBD_BOOST, TileTypes.OBD_TEMPS, TileTypes.OBD_ECONOMY, TileTypes.OBD_TRIMS)
++
++/** Dibuja el widget OBD de [type]; un toque abre el Taller ([onWorkshop]). */
++@Composable
++fun ObdWidget(d: Dependencies, type: String, onWorkshop: () -> Unit) {
++    when (type) {
++        TileTypes.OBD_STACK -> ObdStackTile(d, onWorkshop)
++        TileTypes.OBD_BOOST -> ObdBoostTile(d, onWorkshop)
++        TileTypes.OBD_TEMPS -> ObdTempsTile(d, onWorkshop)
++        TileTypes.OBD_ECONOMY -> ObdEconomyTile(d, onWorkshop)
++        TileTypes.OBD_TRIMS -> ObdTrimsTile(d, onWorkshop)
++    }
++}
++
++/** Lo que se ve en la lista "Motor en vivo", en orden, y el rango de su barra (en la unidad del bus). */
++private val STACK = listOf(
++    Signal.SPEED to (0f to 200f),
++    Signal.RPM to (0f to 8000f),
++    Signal.LOAD to (0f to 100f),
++    Signal.THROTTLE to (0f to 100f),
++    Signal.TIMING to (-10f to 50f),
++    Signal.MAF to (0f to 150f),
++    Signal.MAP to (0f to 250f),
++)
++
++/** Alto de cada renglón de la lista y lo que los separa. */
++private val STACK_ROW = 52.dp
++private val STACK_GAP = 6.dp
++
++/** Hasta dónde llega la barra de los ajustes de mezcla (±%) y desde dónde preocupan. */
++private const val TRIM_RANGE = 25f
++private const val TRIM_WARN = 10f
++
++/** El OBD de la pieza: conectado (null si no) y si este auto da [signal]. */
++private fun ObdRepository?.reads(signal: String) = this != null && state == ObdState.ON && canRead(signal)
++
++/** El encabezado de los widgets OBD: su nombre y, a la derecha, conectado, conectando o sin OBD. */
++@Composable
++private fun ObdHeader(title: String, obd: ObdRepository?) {
++    val c = LocalColors.current
++    when (obd?.state) {
++        ObdState.ON -> TileHeader(title, "OBD", c.good)
++        ObdState.CONNECTING -> TileHeader(title, stringResource(R.string.obd_connecting_short), c.textMuted)
++        else -> TileHeader(title, stringResource(R.string.gauge_no_obd), c.textMuted)
++    }
++}
++
++/** El fondo de lo que va dentro de la tarjeta (renglones, celdas): como las tarjetas de dato del Taller. */
++private fun Modifier.inner(color: Color): Modifier = clip(RoundedCornerShape(Radius.inner)).background(color)
++
++/** Barra fina de 0 a 1 ([fraction]; null = sin dato, solo el riel). */
++private fun Modifier.levelBar(fraction: Float?, track: Color, fill: Color) = drawBehind {
++    val r = CornerRadius(size.height / 2)
++    drawRoundRect(track, cornerRadius = r)
++    if (fraction != null && fraction > 0f) drawRoundRect(fill, size = Size(size.width * fraction.coerceIn(0f, 1f), size.height), cornerRadius = r)
++}
++
++/** Barra que sale del centro (0) hacia la izquierda o la derecha, para los ajustes de mezcla. */
++private fun Modifier.centerBar(value: Float?, track: Color, fill: Color, mark: Color) = drawBehind {
++    drawRoundRect(track, cornerRadius = CornerRadius(size.height / 2))
++    val mid = size.width / 2
++    if (value != null) {
++        val end = mid + (value / TRIM_RANGE).coerceIn(-1f, 1f) * mid
++        drawRect(fill, Offset(minOf(mid, end), 0f), Size(abs(end - mid), size.height))
++    }
++    val w = 2.dp.toPx()
++    drawRect(mark, Offset(mid - w / 2, -size.height / 2), Size(w, size.height * 2))
++}
++
++/**
++ * "Motor en vivo": velocidad, revoluciones, carga, acelerador, avance, flujo de aire y presión del múltiple, uno
++ * por renglón con su barra. Caben los que dé el alto (los primeros); conectado, solo los que da este auto.
++ */
++@Composable
++fun ObdStackTile(d: Dependencies, onWorkshop: () -> Unit) {
++    val c = LocalColors.current
++    val obd = rememberObd(d)
++    val on = obd?.state == ObdState.ON
++    val units = d.prefs.units
++    val locale = currentLocale()
++    val rows = if (on) STACK.filter { obd.reads(it.first) } else STACK
++    Card(Modifier.fillMaxSize(), onClick = onWorkshop) {
++        Column(Modifier.fillMaxSize().padding(TilePadding)) {
++            ObdHeader(stringResource(R.string.tile_obd_stack), obd)
++            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp)) {
++                val fit = ((maxHeight + STACK_GAP) / (STACK_ROW + STACK_GAP)).toInt().coerceAtLeast(1)
++                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(STACK_GAP)) {
++                    for ((signal, range) in rows.take(fit)) {
++                        StackRow(d, signal, range, on, units, locale, Modifier.fillMaxWidth().height(STACK_ROW))
++                    }
++                    if (on && rows.isEmpty()) Label(stringResource(R.string.gauge_no_data), Typography.small, c.textMuted)
++                }
++            }
++        }
++    }
++}
++
++/** Un renglón de la lista: el nombre en chico, el valor con su unidad y una barra con su rango. */
++@Composable
++private fun StackRow(d: Dependencies, signal: String, range: Pair<Float, Float>, on: Boolean, units: UnitChoice, locale: Locale, modifier: Modifier) {
++    val c = LocalColors.current
++    // Cada renglón lee su dato: uno nuevo solo vuelve a dibujar el suyo.
++    val value = if (on) d.bus.watch(signal) else null
++    val warn = value != null && gaugeOf(signal)?.warning?.invoke(value) == true
++    Column(modifier.inner(c.surfaceHigh).padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
++        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
++            Label(stringResource(sensorName(signal)).uppercase(locale), Typography.label, c.textMuted, maxLines = 1, modifier = Modifier.weight(1f))
++            Label(
++                value?.let { sensorText(signal, it, units, locale) } ?: "—",
++                Typography.subtitle, if (warn) c.danger else c.text, maxLines = 1,
++                modifier = Modifier.padding(start = 8.dp),
++            )
++        }
++        val (min, max) = range
++        Spacer(
++            Modifier.fillMaxWidth().height(4.dp)
++                .levelBar(value?.let { (it - min) / (max - min) }, c.line, if (warn) c.danger else c.accent),
++        )
++    }
++}
++
++/**
++ * "Turbo / vacío": la presión del múltiple contra la del aire, en un medio arco que sale del 0 hacia el vacío
++ * (izquierda) o hacia la presión del turbo (derecha). En psi, como el medidor Turbo.
++ */
++@Composable
++fun ObdBoostTile(d: Dependencies, onWorkshop: () -> Unit) {
++    val c = LocalColors.current
++    val spec = gaugeOf(Signal.BOOST) ?: return
++    val obd = rememberObd(d)
++    val readable = obd.reads(Signal.BOOST)
++    val kpa = if (readable) d.bus.watch(Signal.BOOST) else null
++    val units = d.prefs.units
++    val locale = currentLocale()
++    val number = kpa?.let { gaugeText(spec, it, units, locale) } ?: "—"
++    val zero = spec.fraction(0f)
++    val fraction = kpa?.let { spec.fraction(it).coerceIn(0f, 1f) }
++    val track = c.line
++    val fill = if (kpa != null && kpa > 0f) c.warning else c.accent
++    Card(Modifier.fillMaxSize(), onClick = onWorkshop) {
++        Column(Modifier.fillMaxSize().padding(TilePadding)) {
++            ObdHeader(stringResource(R.string.tile_obd_boost), obd)
++            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(top = 6.dp)) {
++                val tall = maxHeight > 120.dp
++                Spacer(
++                    Modifier.fillMaxSize().drawBehind {
++                        val stroke = (minOf(size.width, size.height) * 0.09f).coerceIn(6.dp.toPx(), 18.dp.toPx())
++                        val r = minOf((size.width - stroke) / 2, size.height - stroke).coerceAtLeast(1f)
++                        val topLeft = Offset(size.width / 2 - r, stroke / 2)
++                        val box = Size(r * 2, r * 2)
++                        val style = Stroke(stroke, cap = StrokeCap.Round)
++                        drawArc(track, 180f, 180f, false, topLeft, box, style = style)
++                        if (fraction != null && abs(fraction - zero) > 0.002f) {
++                            drawArc(fill, 180f + 180f * minOf(zero, fraction), 180f * abs(fraction - zero), false, topLeft, box, style = Stroke(stroke))
++                        }
++                        // La marca del 0 (la presión del aire de afuera).
++                        val angle = Math.toRadians(180.0 + 180.0 * zero)
++                        val cx = size.width / 2
++                        val cy = stroke / 2 + r
++                        val inner = r - stroke
++                        val outer = r + stroke * 0.6f
++                        drawLine(
++                            c.textMuted,
++                            Offset(cx + inner * kotlin.math.cos(angle).toFloat(), cy + inner * kotlin.math.sin(angle).toFloat()),
++                            Offset(cx + outer * kotlin.math.cos(angle).toFloat(), cy + outer * kotlin.math.sin(angle).toFloat()),
++                            2.dp.toPx(),
++                        )
++                    },
++                )
++                val font = fitFont(number, maxWidth * 0.55f, maxHeight, if (tall) 0.34f else 0.45f, min = 20f, max = 56f, extraChars = 1f)
++                Column(Modifier.align(Alignment.BottomCenter), horizontalAlignment = Alignment.CenterHorizontally) {
++                    Row(verticalAlignment = Alignment.Bottom) {
++                        Label(number, Typography.clock.copy(fontSize = font.sp), maxLines = 1)
++                        Label(
++                            stringResource(spec.unit(units)), Typography.small, c.textMuted, maxLines = 1,
++                            modifier = Modifier.padding(start = 4.dp, bottom = (font * 0.18f).dp),
++                        )
++                    }
++                    if (tall && kpa != null) {
++                        Label(stringResource(if (kpa > 0f) R.string.obd_boosting else R.string.obd_vacuum), Typography.small, c.textMuted, maxLines = 1)
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** Las cuatro temperaturas del widget, con su nombre corto. */
++private val TEMPS = listOf(
++    Signal.COOLANT to R.string.obd_temp_engine,
++    Signal.OIL to R.string.obd_temp_oil,
++    Signal.INTAKE to R.string.obd_temp_intake,
++    Signal.AMBIENT to R.string.obd_temp_outside,
++)
++
++/**
++ * "Temperaturas": motor, aceite, aire de admisión y de afuera. En dos por dos si hay alto; en una fila si no.
++ * Las que este auto no da quedan con "—".
++ */
++@Composable
++fun ObdTempsTile(d: Dependencies, onWorkshop: () -> Unit) {
++    val obd = rememberObd(d)
++    val units = d.prefs.units
++    val locale = currentLocale()
++    Card(Modifier.fillMaxSize(), onClick = onWorkshop) {
++        Column(Modifier.fillMaxSize().padding(TilePadding)) {
++            ObdHeader(stringResource(R.string.tile_obd_temps), obd)
++            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp)) {
++                val gap = 8.dp
++                val cell = @Composable { i: Int, m: Modifier ->
++                    val (signal, name) = TEMPS[i]
++                    TempCell(d, signal, name, obd.reads(signal), units, locale, m)
++                }
++                if (maxHeight >= 120.dp) {
++                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(gap)) {
++                        for (row in 0..1) Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(gap)) {
++                            for (col in 0..1) cell(row * 2 + col, Modifier.weight(1f).fillMaxSize())
++                        }
++                    }
++                } else {
++                    Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(gap)) {
++                        for (i in TEMPS.indices) cell(i, Modifier.weight(1f).fillMaxSize())
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** Una temperatura: su nombre en chico y el número; en rojo si preocupa (motor o aceite calientes). */
++@Composable
++private fun TempCell(d: Dependencies, signal: String, name: Int, readable: Boolean, units: UnitChoice, locale: Locale, modifier: Modifier) {
++    val c = LocalColors.current
++    val value = if (readable) d.bus.watch(signal) else null
++    val warn = value != null && gaugeOf(signal)?.warning?.invoke(value) == true
++    Column(modifier.inner(c.surfaceHigh).padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.SpaceBetween) {
++        Label(stringResource(name).uppercase(locale), Typography.label, c.textMuted, maxLines = 1)
++        Label(value?.let { tempText(it, units.fahrenheit) } ?: "—", Typography.title, if (warn) c.danger else c.text, maxLines = 1)
++    }
++}
++
++/**
++ * "Consumo en vivo": el de ahora en grande, su línea de los últimos [SERIES_SECONDS] segundos y, con alto, el
++ * gasto por hora y la gasolina del tanque. En km/L o mpg, como el medidor Consumo.
++ */
++@Composable
++fun ObdEconomyTile(d: Dependencies, onWorkshop: () -> Unit) {
++    val c = LocalColors.current
++    val spec = gaugeOf(Signal.CONSUMPTION) ?: return
++    val obd = rememberObd(d)
++    val readable = obd.reads(Signal.CONSUMPTION)
++    val value = if (readable) d.bus.watch(Signal.CONSUMPTION) else null
++    // La línea solo se arma (y el dato solo se pide) si el auto lo da.
++    val series = if (readable) rememberSeries(d, Signal.CONSUMPTION) else emptyList()
++    val units = d.prefs.units
++    val locale = currentLocale()
++    val number = value?.let { gaugeText(spec, it, units, locale) } ?: "—"
++    Card(Modifier.fillMaxSize(), onClick = onWorkshop) {
++        Column(Modifier.fillMaxSize().padding(TilePadding)) {
++            ObdHeader(stringResource(R.string.tile_obd_economy), obd)
++            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(top = 6.dp)) {
++                val tall = maxHeight > 150.dp
++                val font = fitFont(number, maxWidth * 0.6f, maxHeight, if (tall) 0.3f else 0.5f, min = 24f, max = 56f, extraChars = 1f)
++                Column(Modifier.fillMaxSize()) {
++                    Row(verticalAlignment = Alignment.Bottom) {
++                        Label(number, Typography.clock.copy(fontSize = font.sp), maxLines = 1)
++                        Label(
++                            stringResource(spec.unit(units)), Typography.small, c.textMuted, maxLines = 1,
++                            modifier = Modifier.padding(start = 6.dp, bottom = (font * 0.18f).dp),
++                        )
++                    }
++                    Sparkline(series, c.accent, Modifier.fillMaxWidth().weight(1f).padding(vertical = 6.dp), minSpan = 2f)
++                    if (tall) {
++                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                            SmallStat(d, obd, Signal.FUEL_RATE, units, locale, Modifier.weight(1f))
++                            SmallStat(d, obd, Signal.FUEL, units, locale, Modifier.weight(1f))
++                        }
++                    } else {
++                        Label(stringResource(R.string.obd_last_seconds, SERIES_SECONDS), Typography.small, c.textMuted, maxLines = 1)
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** Un dato chico con su nombre debajo (gasto por hora, gasolina, batería). */
++@Composable
++private fun SmallStat(d: Dependencies, obd: ObdRepository?, signal: String, units: UnitChoice, locale: Locale, modifier: Modifier) {
++    val c = LocalColors.current
++    val value = if (obd.reads(signal)) d.bus.watch(signal) else null
++    val warn = value != null && gaugeOf(signal)?.warning?.invoke(value) == true
++    Column(modifier.inner(c.surfaceHigh).padding(horizontal = 12.dp, vertical = 8.dp)) {
++        Label(value?.let { sensorText(signal, it, units, locale) } ?: "—", Typography.subtitle, if (warn) c.danger else c.text, maxLines = 1)
++        Label(stringResource(sensorName(signal)), Typography.small, c.textMuted, maxLines = 1)
++    }
++}
++
++/**
++ * "Ajustes de mezcla": el corto y el largo plazo como barras que salen del centro (más gasolina a la derecha,
++ * menos a la izquierda; en ámbar pasando de ±10 %) y, con alto, el voltaje de la batería.
++ */
++@Composable
++fun ObdTrimsTile(d: Dependencies, onWorkshop: () -> Unit) {
++    val c = LocalColors.current
++    val obd = rememberObd(d)
++    val units = d.prefs.units
++    val locale = currentLocale()
++    Card(Modifier.fillMaxSize(), onClick = onWorkshop) {
++        Column(Modifier.fillMaxSize().padding(TilePadding)) {
++            ObdHeader(stringResource(R.string.tile_obd_trims), obd)
++            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp)) {
++                val tall = maxHeight > 140.dp
++                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceEvenly) {
++                    TrimRow(d, obd, Signal.FUEL_TRIM_SHORT, R.string.obd_trim_short, units, locale, c.line, c.textMuted)
++                    TrimRow(d, obd, Signal.FUEL_TRIM_LONG, R.string.obd_trim_long, units, locale, c.line, c.textMuted)
++                    if (tall) SmallStat(d, obd, Signal.VOLTAGE, units, locale, Modifier.fillMaxWidth())
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun TrimRow(d: Dependencies, obd: ObdRepository?, signal: String, name: Int, units: UnitChoice, locale: Locale, track: Color, mark: Color) {
++    val c = LocalColors.current
++    val value = if (obd.reads(signal)) d.bus.watch(signal) else null
++    val warn = value != null && abs(value) > TRIM_WARN
++    Column(Modifier.fillMaxWidth()) {
++        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
++            Label(stringResource(name), Typography.body, c.textMuted, maxLines = 1, modifier = Modifier.weight(1f))
++            Label(value?.let { sensorText(signal, it, units, locale) } ?: "—", Typography.subtitle, if (warn) c.warning else c.text, maxLines = 1)
++        }
++        Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(TRIM_BAR).centerBar(value, track, if (warn) c.warning else c.accent, mark))
++    }
++}
++
++/** Alto de la barra de un ajuste de mezcla. */
++private val TRIM_BAR: Dp = 8.dp
+diff --git a/app/src/main/java/com/irvingguerra/litedash/Panels.kt b/app/src/main/java/com/irvingguerra/litedash/Panels.kt
+index 78aa6cd..74a8be7 100644
+--- a/app/src/main/java/com/irvingguerra/litedash/Panels.kt
++++ b/app/src/main/java/com/irvingguerra/litedash/Panels.kt
+@@ -272,6 +272,7 @@ private fun ColumnScope.ScrollingColumns(minWidth: Dp, gap: Dp, content: @Compos
+ /** Los grupos de "Agregar al inicio", en orden, con sus widgets. */
+ private enum class AddGroup(val title: Int, val types: List<String>) {
+     CAR(R.string.add_group_car, listOf(TileTypes.CAR, TileTypes.ROAD, TileTypes.IMAGE, TileTypes.SPEEDOMETER, TileTypes.GAUGE, TileTypes.TIRES, TileTypes.WORKSHOP, TileTypes.TRIP)),
++    ENGINE(R.string.add_group_engine, listOf(TileTypes.OBD_STACK, TileTypes.OBD_BOOST, TileTypes.OBD_TEMPS, TileTypes.OBD_ECONOMY, TileTypes.OBD_TRIMS)),
+     MEDIA(R.string.add_group_media, listOf(TileTypes.MUSIC, TileTypes.RADIO)),
+     ROAD(R.string.add_group_nav, listOf(TileTypes.MAP, TileTypes.PROJECTION, TileTypes.PHONE)),
+     INFO(R.string.add_group_info, listOf(TileTypes.CLOCK, TileTypes.WEATHER)),
+@@ -362,6 +363,11 @@ internal fun iconOf(type: String) = when (type) {
+     TileTypes.WORKSHOP -> Icons.engine
+     TileTypes.PROJECTION -> Icons.phoneCar
+     TileTypes.TIRES -> Icons.tire
++    TileTypes.OBD_STACK -> Icons.list
++    TileTypes.OBD_BOOST -> Icons.turbo
++    TileTypes.OBD_TEMPS -> Icons.thermometer
++    TileTypes.OBD_ECONOMY -> Icons.drop
++    TileTypes.OBD_TRIMS -> Icons.fuel
+     else -> Icons.apps
+ }
+ 
+diff --git a/app/src/main/java/com/irvingguerra/litedash/Tiles.kt b/app/src/main/java/com/irvingguerra/litedash/Tiles.kt
+index a9feb75..ac4a0bb 100644
+--- a/app/src/main/java/com/irvingguerra/litedash/Tiles.kt
++++ b/app/src/main/java/com/irvingguerra/litedash/Tiles.kt
+@@ -95,6 +95,11 @@ val TileSpecs = listOf(
+     TileSpec(TileTypes.SPEEDOMETER, R.string.tile_speedometer, SizeLimits(4, 2), 6 to 4, R.string.tile_speedometer_help),
+     TileSpec(TileTypes.GAUGE, R.string.tile_gauge, SizeLimits(4, 2), 6 to 4, R.string.tile_gauge_help),
+     TileSpec(TileTypes.WORKSHOP, R.string.workshop, SizeLimits(2, 2), 4 to 2, R.string.tile_workshop_help),
++    TileSpec(TileTypes.OBD_STACK, R.string.tile_obd_stack, SizeLimits(4, 3), 6 to 8, R.string.tile_obd_stack_help),
++    TileSpec(TileTypes.OBD_BOOST, R.string.tile_obd_boost, SizeLimits(4, 3), 6 to 5, R.string.tile_obd_boost_help),
++    TileSpec(TileTypes.OBD_TEMPS, R.string.tile_obd_temps, SizeLimits(6, 2), 6 to 4, R.string.tile_obd_temps_help),
++    TileSpec(TileTypes.OBD_ECONOMY, R.string.tile_obd_economy, SizeLimits(4, 3), 6 to 5, R.string.tile_obd_economy_help),
++    TileSpec(TileTypes.OBD_TRIMS, R.string.tile_obd_trims, SizeLimits(4, 3), 6 to 4, R.string.tile_obd_trims_help),
+     TileSpec(TileTypes.PROJECTION, R.string.tile_projection, SizeLimits(4, 2), 6 to 2, R.string.tile_projection_help),
+     TileSpec(TileTypes.TIRES, R.string.tile_tires, SizeLimits(2, 2), 4 to 4, R.string.tile_tires_help),
+     TileSpec(TileTypes.APP, R.string.tile_app, SizeLimits(2, 2), 2 to 2, R.string.tile_app_help),
+diff --git a/app/src/main/res/values-en/strings.xml b/app/src/main/res/values-en/strings.xml
+index f365dae..6051ea2 100644
+--- a/app/src/main/res/values-en/strings.xml
++++ b/app/src/main/res/values-en/strings.xml
+@@ -672,6 +672,26 @@
+     <string name="tires">Tires</string>
+     <string name="tile_tires">Tires</string>
+     <string name="tile_tires_help">Pressure of your four tires; a tap shows them big</string>
++    <string name="tile_obd_stack">Live engine</string>
++    <string name="tile_obd_stack_help">Speed, rpm, load, throttle, timing, airflow and intake pressure in one list</string>
++    <string name="tile_obd_boost">Boost / vacuum</string>
++    <string name="tile_obd_boost_help">Intake pressure against the air outside: vacuum when cruising, pressure on boost</string>
++    <string name="tile_obd_temps">Temperatures</string>
++    <string name="tile_obd_temps_help">Engine, oil, intake air and outside</string>
++    <string name="tile_obd_economy">Live fuel economy</string>
++    <string name="tile_obd_economy_help">Economy right now with its line for the last few seconds, fuel rate and tank level</string>
++    <string name="tile_obd_trims">Fuel trims</string>
++    <string name="tile_obd_trims_help">Short- and long-term fuel trims plus battery voltage</string>
++    <string name="add_group_engine">Live engine (OBD)</string>
++    <string name="obd_vacuum">Vacuum</string>
++    <string name="obd_boosting">On boost</string>
++    <string name="obd_temp_engine">Engine</string>
++    <string name="obd_temp_oil">Oil</string>
++    <string name="obd_temp_intake">Intake</string>
++    <string name="obd_temp_outside">Outside</string>
++    <string name="obd_trim_short">Short term</string>
++    <string name="obd_trim_long">Long term</string>
++    <string name="obd_last_seconds">Last %d s</string>
+     <string name="tire_good">Good</string>
+     <string name="tire_low">Low</string>
+     <string name="tire_leak">Leak</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index db82a95..e76c729 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -698,6 +698,26 @@
+     <string name="tires">Llantas</string>
+     <string name="tile_tires">Llantas</string>
+     <string name="tile_tires_help">Presión de tus cuatro llantas; un toque las muestra en grande</string>
++    <string name="tile_obd_stack">Motor en vivo</string>
++    <string name="tile_obd_stack_help">Velocidad, revoluciones, carga, acelerador, avance, aire y presión de admisión en una lista</string>
++    <string name="tile_obd_boost">Turbo / vacío</string>
++    <string name="tile_obd_boost_help">La presión de admisión contra la del aire: vacío al ir tranquilo, presión con turbo</string>
++    <string name="tile_obd_temps">Temperaturas</string>
++    <string name="tile_obd_temps_help">Motor, aceite, aire de admisión y de afuera</string>
++    <string name="tile_obd_economy">Consumo en vivo</string>
++    <string name="tile_obd_economy_help">El consumo de ahora con su línea de los últimos segundos, el gasto por hora y la gasolina</string>
++    <string name="tile_obd_trims">Mezcla</string>
++    <string name="tile_obd_trims_help">Ajuste de mezcla corto y largo, y el voltaje de la batería</string>
++    <string name="add_group_engine">Motor en vivo (OBD)</string>
++    <string name="obd_vacuum">Vacío</string>
++    <string name="obd_boosting">Con turbo</string>
++    <string name="obd_temp_engine">Motor</string>
++    <string name="obd_temp_oil">Aceite</string>
++    <string name="obd_temp_intake">Admisión</string>
++    <string name="obd_temp_outside">Afuera</string>
++    <string name="obd_trim_short">Corto plazo</string>
++    <string name="obd_trim_long">Largo plazo</string>
++    <string name="obd_last_seconds">Últimos %d s</string>
+     <string name="tire_good">Bien</string>
+     <string name="tire_low">Baja</string>
+     <string name="tire_leak">Fuga</string>
+diff --git a/app/src/test/java/com/irvingguerra/litedash/ObdWidgetsTest.kt b/app/src/test/java/com/irvingguerra/litedash/ObdWidgetsTest.kt
+new file mode 100644
+index 0000000..4825034
+--- /dev/null
++++ b/app/src/test/java/com/irvingguerra/litedash/ObdWidgetsTest.kt
+@@ -0,0 +1,23 @@
++package com.irvingguerra.litedash
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class ObdWidgetsTest {
++    @Test
++    fun cadaWidgetObdSePuedeAgregar() {
++        for (type in OBD_WIDGETS) {
++            val spec = TileSpecs.firstOrNull { it.type == type }
++            assertNotNull("$type sin TileSpec", spec)
++            // El tamaño con que se agrega respeta su mínimo.
++            assertTrue(type, spec!!.initialSize.first >= spec.limits.minWidth && spec.initialSize.second >= spec.limits.minHeight)
++        }
++    }
++
++    @Test
++    fun losTiposNoSeRepiten() {
++        assertEquals(TileSpecs.size, TileSpecs.map { it.type }.toSet().size)
++    }
++}
+diff --git a/feature/dashboard/src/main/java/com/irvingguerra/litedash/feature/dashboard/Model.kt b/feature/dashboard/src/main/java/com/irvingguerra/litedash/feature/dashboard/Model.kt
+index 258fce1..fbe1c30 100644
+--- a/feature/dashboard/src/main/java/com/irvingguerra/litedash/feature/dashboard/Model.kt
++++ b/feature/dashboard/src/main/java/com/irvingguerra/litedash/feature/dashboard/Model.kt
+@@ -215,6 +215,12 @@ object TileTypes {
+     /** Presión de las cuatro llantas (módulo de llantas). */
+     const val TIRES = "tires"
+     const val APP = "app"
++    /** Widgets del OBD en vivo (módulo OBD): la lista del motor, turbo/vacío, temperaturas, consumo y mezcla. */
++    const val OBD_STACK = "obd_stack"
++    const val OBD_BOOST = "obd_boost"
++    const val OBD_TEMPS = "obd_temps"
++    const val OBD_ECONOMY = "obd_economy"
++    const val OBD_TRIMS = "obd_trims"
+ }
+ 
+ /** Sin fondo de tarjeta siempre: el auto, la carretera y la imagen flotan sobre el inicio. */
